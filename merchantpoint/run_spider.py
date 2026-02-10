@@ -1,20 +1,30 @@
+# run_spider.py
 from scrapy.crawler import CrawlerProcess
 from scrapy.utils.project import get_project_settings
+import sys
 import os
 
+# Добавляем путь к проекту
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-def run_spider():
-    """Функция для запуска паука"""
-    # Устанавливаем настройки проекта
-    os.environ.setdefault('SCRAPY_SETTINGS_MODULE', 'merchantpoint.settings')
 
-    # Создаем процесс краулера
-    process = CrawlerProcess(get_project_settings())
+def run_spider(max_items=10000):
+    # Импортируем паука
+    from merchantpoint.spiders.merchant_spider_advanced import MerchantSpiderAdvanced
 
-    # Запускаем паука
-    process.crawl('merchant_advanced')
+    # Настройки
+    settings = get_project_settings()
+    settings.set('FEED_FORMAT', 'csv')
+    settings.set('FEED_URI', 'merchants_data.csv')
+    settings.set('FEED_EXPORT_ENCODING', 'utf-8')
+
+    # Создаем процесс
+    process = CrawlerProcess(settings)
+
+    # Запускаем паука с параметрами
+    process.crawl(MerchantSpiderAdvanced, max_items=max_items)
     process.start()
 
 
 if __name__ == '__main__':
-    run_spider()
+    run_spider(max_items=100)

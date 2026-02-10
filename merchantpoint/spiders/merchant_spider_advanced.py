@@ -1,9 +1,8 @@
-# merchantpoint/spiders/merchant_spider_advanced.py
+# merchantpoint_spider/spiders/merchant_spider_advanced.py
 import scrapy
 from scrapy import Request
-from merchantpoint.items import MerchantItem
 import re
-from scrapy.exceptions import DropItem
+from merchantpoint.items import MerchantItem
 
 
 class MerchantSpiderAdvanced(scrapy.Spider):
@@ -15,15 +14,8 @@ class MerchantSpiderAdvanced(scrapy.Spider):
         'ROBOTSTXT_OBEY': True,
         'DOWNLOAD_DELAY': 2,
         'CONCURRENT_REQUESTS': 1,
-        'USER_AGENT': 'MerchantSpider/1.0',
-        'FEEDS': {
-            'merchants_data.csv': {
-                'format': 'csv',
-                'encoding': 'utf8',
-                'store_empty': False,
-            },
-        },
-                'LOG_LEVEL': 'INFO',
+        'USER_AGENT': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'LOG_LEVEL': 'INFO',
         'HTTPCACHE_ENABLED': True,
         'HTTPCACHE_EXPIRATION_SECS': 3600,
     }
@@ -31,211 +23,213 @@ class MerchantSpiderAdvanced(scrapy.Spider):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.items_count = 0
-        self.max_items = 1000  # Ограничение на количество записей
+        self.max_items = kwargs.get('max_items', 10000)
 
     def parse(self, response):
         """Парсинг страницы со списком брендов"""
         self.logger.info(f"Parsing brands page: {response.url}")
 
-        # XPath для извлечения ссылок на бренды
+        # Ищем таблицу с брендами
         brand_rows = response.xpath('//table[@class="finance-table"]//tbody/tr')
+
+        if not brand_rows:
+            self.logger.warning("No brand rows found with finance-table class, trying alternative selector")
+            brand_rows = response.xpath('//table//tbody/tr')
+
+        self.logger.info(f"Found {len(brand_rows)} brand rows")
 
         for row in brand_rows:
             if self.items_count >= self.max_items:
-                self.logger.info(f"Reached maximum items limit: {self.max_items}")
+                self.logger.info(f"Reached max items limit: {self.max_items}")
                 return
 
-            # Извлекаем ссылку и название бренда
+            # Извлекаем ссылку на бренд
             brand_link = row.xpath('.//td[2]/a/@href').get()
             brand_name = row.xpath('.//td[2]/a/text()').get()
 
             if brand_link:
                 full_url = response.urljoin(brand_link)
+                self.logger.info(f"Following brand: {brand_name} - {full_url}")
                 yield Request(
                     url=full_url,
                     callback=self.parse_brand,
-                    meta={
-                        'brand_url': full_url,
-                        'brand_name': brand_name
-                    },
-                    errback=self.handle_error
+                    meta={'brand_name': brand_name, 'brand_url': full_url},
+                    dont_filter=True
                 )
 
         # Пагинация
-        if self.items_count < self.max_items:
-            next_page = response.xpath('//a[contains(text(), "Далее")]/@href').get()
-            if next_page:
-                yield Request(
-                    url=response.urljoin(next_page),
-                    callback=self.parse,
-                    errback=self.handle_error
-                )
+        next_page = response.xpath('//a[contains(text(), "Далее")]/@href').get()
+        if not next_page:
+            next_page = response.xpath('//a[contains(@class, "next")]/@href').get()
+
+        if next_page and self.items_count < self.max_items:
+            next_url = response.urljoin(next_page)
+            self.logger.info(f"Following next page: {next_url}")
+            yield Request(url=next_url, callback=self.parse)
 
     def parse_brand(self, response):
         """Парсинг страницы бренда"""
         self.logger.info(f"Parsing brand page: {response.url}")
 
-        # Извлекаем информацию о бренде
-        org_name = response.xpath('//h1[contains(@class, "text-3xl") or contains(@class, "text-4xl")]/text()').get()
+        # Название организации
+        org_name = response.xpath('//h1[@class="text-3xl font-bold mb-4"]/text()').get()
         if not org_name:
-            # Альтернативный XPath
-            org_name = response.meta.get('brand_name', '')
-        else:
-            org_name = org_name.strip()
+            org_name = response.xpath('//h1/text()').get()
+        if not org_name:
+            org_name = response.meta.get('brand_name', 'Unknown')
 
-        # Описание организации - улучшенный XPath
-        org_description_xpath = '''
-            //div[contains(@class, "description_brand")]//text() |
-            //section[@id="description"]//div[contains(@class, "prose")]//text()
-        '''
-        org_description = response.xpath(org_description_xpath).getall()
+        # Описание организации
+        org_description = response.xpath('//div[@class="prose max-w-none mb-8"]//text()').getall()
+        if not org_description:
+            org_description = response.xpath('//div[contains(@class, "description")]//text()').getall()
         org_description = ' '.join([text.strip() for text in org_description if text.strip()])
 
-        # Очистка описания от HTML тегов и лишних символов
-        org_description = re.sub(r'<[^>]+>', '', org_description)
-        org_description = re.sub(r'\s+', ' ', org_description).strip()
+        # ДОБАВИТЬ: Поиск ссылок на merchant страницы
+        merchant_links = response.xpath('//a[contains(@href, "/merchant/")]')
 
-        # Ищем таблицу с торговыми точками
-        merchant_table_xpath = '//section[@id="sms"]//table[@class="finance-table"]//tbody/tr'
-        merchant_rows = response.xpath(merchant_table_xpath)
+        if merchant_links:
+            self.logger.info(f"Found {len(merchant_links)} merchant links for {org_name}")
 
-        if not merchant_rows:
-            self.logger.warning(f"No merchant rows found on {response.url}")
-            # Альтернативный путь поиска
-            merchant_rows = response.xpath('//table[contains(@class, "finance-table")]//tbody/tr')
+            for link in merchant_links:
+                if self.items_count >= self.max_items:
+                    return
 
-        for row in merchant_rows:
-            if self.items_count >= self.max_items:
+                # Получаем строку таблицы
+                row = link.xpath('./ancestor::tr')
+
+                # Извлекаем данные
+                mcc = row.xpath('.//td[1]/text()').get()
+                merchant_name = link.xpath('./text()').get()
+                merchant_link = link.xpath('./@href').get()
+                address = row.xpath('.//td[3]/text()').get()
+
+                if merchant_link:
+                    detail_url = response.urljoin(merchant_link)
+                    yield Request(
+                        url=detail_url,
+                        callback=self.parse_merchant_detail,  # Исправлено имя метода
+                        meta={
+                            'mcc': mcc.strip() if mcc else '',
+                            'merchant_name': merchant_name.strip() if merchant_name else '',
+                            'address_from_table': address.strip() if address else '',
+                            'org_name': org_name,
+                            'org_description': org_description
+                        },
+                        dont_filter=True
+                    )
+        else:
+        # Если не нашли merchant ссылки, пробуем старый способ с таблицей
+            merchant_rows = response.xpath('//section[@id="sms"]//table//tbody/tr')
+            if not merchant_rows:
+                merchant_rows = response.xpath('//table[contains(@class, "table")]//tbody/tr')
+
+            self.logger.info(f"Found {len(merchant_rows)} merchant rows for {org_name}")
+
+            if len(merchant_rows) == 0:
+                self.logger.warning(f"No merchants found on page: {response.url}")
                 return
 
-                # Извлекаем данные из строки таблицы
-            mcc = row.xpath('.//td[1]/text()').get()
-            merchant_link = row.xpath('.//td[2]/a/@href').get()
-            merchant_name = row.xpath('.//td[2]/a/text()').get()
-            address = row.xpath('.//td[3]/text()').get()
+            for row in merchant_rows:
+                if self.items_count >= self.max_items:
+                    return
 
-            if merchant_link:
-                merchant_url = response.urljoin(merchant_link)
-                yield Request(
-                    url=merchant_url,
-                    callback=self.parse_merchant,
-                    meta={
-                        'org_name': org_name,
-                        'org_description': org_description,
-                        'brand_url': response.meta.get('brand_url'),
-                        'mcc_from_table': mcc,
-                        'merchant_name_from_table': merchant_name,
-                        'address_from_table': address
-                    },
-                    errback=self.handle_error
-                )
-            elif merchant_name and mcc:
-                # Если нет ссылки на детальную страницу, сохраняем данные из таблицы
-                item = MerchantItem()
-                item['merchant_name'] = merchant_name.strip() if merchant_name else ''
-                item['mcc'] = mcc.strip() if mcc else ''
-                item['address'] = address.strip() if address else ''
-                item['geo_coordinates'] = ''
-                item['org_name'] = org_name
-                item['org_description'] = org_description
-                item['source_url'] = response.url
+                # MCC код
+                mcc = row.xpath('.//td[1]/text()').get()
+                if not mcc:
+                    continue
 
-                self.items_count += 1
-                yield item
+                # Название торговой точки
+                merchant_name = row.xpath('.//td[2]/a/text()').get()
+                if not merchant_name:
+                    merchant_name = row.xpath('.//td[2]/text()').get()
 
-        def parse_merchant(self, response):
-            """Парсинг страницы торговой точки"""
-            self.logger.info(f"Parsing merchant page: {response.url}")
+                # Ссылка на детальную страницу
+                detail_link = row.xpath('.//td[2]/a/@href').get()
 
-            item = MerchantItem()
+                # Адрес из таблицы
+                address = row.xpath('.//td[3]/text()').get()
 
-            # Название точки - комбинированный подход
-            merchant_name = response.xpath(
-                '//h1[contains(@class, "text-3xl") or contains(@class, "text-4xl")]/text()').get()
-            if not merchant_name:
-                merchant_name = response.meta.get('merchant_name_from_table', '')
-            item['merchant_name'] = merchant_name.strip() if merchant_name else ''
+                if detail_link:
+                    # Переходим на детальную страницу
+                    detail_url = response.urljoin(detail_link)
+                    yield Request(
+                        url=detail_url,
+                        callback=self.parse_merchant_detail,  # Исправлено имя метода
+                        meta={
+                            'mcc': mcc.strip() if mcc else '',
+                            'merchant_name': merchant_name.strip() if merchant_name else '',
+                            'address_from_table': address.strip() if address else '',
+                            'org_name': org_name,
+                            'org_description': org_description
+                        },
+                        dont_filter=True
+                    )
+                else:
+                    # Если нет детальной страницы, сохраняем что есть
+                    item = MerchantItem()
+                    item['mcc'] = mcc.strip() if mcc else ''
+                    item['merchant_name'] = merchant_name.strip() if merchant_name else ''
+                    item['address'] = address.strip() if address else ''
+                    item['geo_coordinates'] = ''
+                    item['org_name'] = org_name
+                    item['org_description'] = org_description
+                    item['source_url'] = response.url
 
-            # MCC код - несколько вариантов XPath
-            mcc_xpaths = [
-                '//p[contains(., "MCC код")]/a/text()',
-                '//p[b[contains(text(), "MCC код")]]/a/text()',
-                '//p[contains(text(), "MCC")]/following-sibling::text()[1]',
-                '//td[contains(text(), "MCC")]/following-sibling::td/text()'
-            ]
+                    self.items_count += 1
+                    yield item
 
-            mcc = None
-            for xpath in mcc_xpaths:
-                mcc = response.xpath(xpath).get()
-                if mcc:
-                    break
+    def parse_merchant_detail(self, response):
+        """Парсинг детальной страницы торговой точки"""
+        self.logger.info(f"Parsing merchant detail: {response.url}")
 
-            if not mcc:
-                # Используем MCC из таблицы на предыдущей странице
-                mcc = response.meta.get('mcc_from_table', '')
+        item = MerchantItem()
 
-            # Извлекаем только цифры MCC
-            if mcc:
-                mcc_match = re.search(r'\d{4}', str(mcc))
-                item['mcc'] = mcc_match.group() if mcc_match else mcc.strip()
-            else:
-                item['mcc'] = ''
+        # Данные из meta
+        item['mcc'] = response.meta.get('mcc', '')
+        item['merchant_name'] = response.meta.get('merchant_name', '')
 
-            # Адрес - улучшенные XPath выражения
-            address_xpaths = [
-                '//p[b[contains(text(), "Адрес")]]/text()[last()]',
-                '//p[contains(text(), "Адрес")]/following-sibling::text()[1]',
-                '//div[contains(text(), "Адрес")]/following-sibling::div/text()',
-                 '//td[contains(text(), "Адрес")]/following-sibling::td/text()'
-            ]
+        # Адрес - несколько вариантов поиска
+        address_xpaths = [
+            '//p[b[contains(text(), "Адрес")]]/text()[last()]',
+            '//p[contains(text(), "Адрес")]/following-sibling::text()[1]',
+            '//div[contains(@class, "address")]//text()',
+            '//td[contains(text(), "Адрес")]/following-sibling::td/text()'
+        ]
 
-            address = None
-            for xpath in address_xpaths:
-                address = response.xpath(xpath).get()
-                if address:
-                    break
-
-            if not address:
-                address = response.meta.get('address_from_table', '')
-
+        address = None
+        for xpath in address_xpaths:
+            address = response.xpath(xpath).get()
             if address:
-                # Очистка адреса
-                address = address.strip().replace('—', '').replace('–', '').strip()
-            item['address'] = address or ''
+                break
 
-            # Геокоординаты - несколько вариантов извлечения
-            geo_xpaths = [
-                '//p[b[contains(text(), "Геокоординаты")]]/text()[last()]',
-                '//p[contains(text(), "Геокоординаты")]/following-sibling::text()[1]',
-                '//script[contains(text(), "ymaps.Placemark")]/text()'
-            ]
+        if not address:
+            address = response.meta.get('address_from_table', '')
+        item['address'] = address.strip() if address else ''
 
-            geo_coords = None
-            for xpath in geo_xpaths:
-                geo_text = response.xpath(xpath).get()
-                if geo_text:
-                    # Ищем координаты в формате XX.XXXXXX, YY.YYYYYY
-                    coord_pattern = r'(\d{1,3}\.\d+)[,\s]+(\d{1,3}\.\d+)'
-                    match = re.search(coord_pattern, geo_text)
-                    if match:
-                        geo_coords = f"{match.group(1)}, {match.group(2)}"
-                        break
+        # Геокоординаты - ищем на странице
+        geo_patterns = [
+            r'coordinates:\s*\[([0-9.-]+),\s*([0-9.-]+)\]',
+            r'lat[itude]*"?\s*:\s*([0-9.-]+).*?lng|lon[gitude]*"?\s*:\s*([0-9.-]+)',
+            r'data-lat="([0-9.-]+)".*?data-lng="([0-9.-]+)"',
+            r'ymaps\.Placemark\(\[([0-9.-]+),\s*([0-9.-]+)\]'
+        ]
 
-            item['geo_coordinates'] = geo_coords or ''
+        geo_coordinates = ''
+        page_content = response.text
 
-            # Данные организации
-            item['org_name'] = response.meta.get('org_name', '')
-            item['org_description'] = response.meta.get('org_description', '')
+        for pattern in geo_patterns:
+            match = re.search(pattern, page_content, re.IGNORECASE | re.DOTALL)
+            if match:
+                lat, lng = match.groups()
+                geo_coordinates = f"{lat},{lng}"
+                break
 
-            # URL источника
-            item['source_url'] = response.url
+        item['geo_coordinates'] = geo_coordinates
 
-            self.items_count += 1
-            self.logger.info(f"Scraped item #{self.items_count}: {item['merchant_name']}")
+        # Данные организации
+        item['org_name'] = response.meta.get('org_name', '')
+        item['org_description'] = response.meta.get('org_description', '')
+        item['source_url'] = response.url
 
-            yield item
-
-        def handle_error(self, failure):
-            """Обработка ошибок при запросах"""
-            self.logger.error(f"Request failed: {failure.request.url}")
-            self.logger.error(f"Error: {failure.value}")
+        self.items_count += 1
+        yield item
